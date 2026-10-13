@@ -127,7 +127,13 @@ left to a library.
 4. **A map's member order is ordinal ascending by key.** A map (§3.3) is the one object whose keys
    are data rather than schema, so it is the one object that sorts.
 5. **Every declared member is present.** An absent optional value is encoded as `null`; it is never
-   omitted. A map with no entries is `{}`; a list with no items is `[]`.
+   omitted. A map with no entries is `{}`; a list with no items is `[]`. **The one exception is a
+   late member**: a member added to a record after version 1, under §8, and marked *late* where §5
+   declares it. A late member is **omitted** when it carries nothing — absent, or a map with no
+   entries — and is never encoded as `null` or `{}`. That is what makes adding one additive: a
+   document that states nothing in it keeps exactly the bytes it had before the member existed, so no
+   document emitted earlier becomes non-canonical. A reader treats an omitted late member, or one that
+   arrives as `null`, as carrying nothing.
 6. **Strings** escape `"`, `\`, and characters below U+0020 (using `\u00XX` where no short escape
    exists). Characters at or above U+0020 — including all non-ASCII — are emitted literally.
 7. **32-bit integers** are JSON numbers.
@@ -158,7 +164,7 @@ here; there are no others.
 |---|---|---|---|
 | 1 | Object members sorted lexicographically by UTF-16 code unit. | **Records** in declaration order (§3.1 rule 3); **maps** sorted (rule 4). | The shapes are versioned records with a published field order; that order is part of the contract, and re-sorting it would make a document's structure depend on the accident of its field names. An implementation that sorts record members produces a **different, non-conformant document** — this is the divergence most likely to bite, so check it first. |
 | 2 | All numbers serialised as ECMAScript doubles. | 32-bit integers as JSON numbers; **64-bit integers as sign-prefixed decimal strings**; real numbers per JCS. | A seed and a row count are 64-bit integers, and a 64-bit integer is not exactly representable as a double. Silently rounding the seed that reproduces a fit is worse than encoding it as text. The sign prefix is always present, including for zero. |
-| 3 | Says nothing about absent members. | Optional members are always present, `null` when absent. | A reader that distinguishes "absent" from "null" cannot be written against a document where emitters disagree about which to produce. Fixing it to `null` removes the question. |
+| 3 | Says nothing about absent members. | Optional members are always present, `null` when absent — except a late member, which is omitted when it carries nothing (§3.1 rule 5). | A reader that distinguishes "absent" from "null" cannot be written against a document where emitters disagree about which to produce. Fixing it to `null` removes the question. A member added later cannot be fixed the same way without re-encoding every document written before it. |
 | 4 | Says nothing about instants. | ISO-8601 strings with an explicit offset. | An instant with no offset is ambiguous, and an epoch number would re-open divergence 2. |
 | 5 | Says nothing about opacity. | §3.1 rule 13. | A canonicalising relay that "tidies" a payload invalidates a hash it cannot recompute, and the failure surfaces as a mismatched artifact identity a long way from its cause. |
 
@@ -185,6 +191,64 @@ order. There is no nested single-member-object form.
 The discriminator is a string rather than a number so that an unrecognised case is legible to a
 human reading a log, and both discriminated shapes carry an explicit rule for what a reader does
 with a case it does not know (§5.7.2, §5.1.1).
+
+### 3.5 Unit text
+
+A number says nothing about what it measures. Where this specification lets a value state its unit,
+the unit crosses as **unit text**: one string, which MUST be the **canonical text** of an **admitted
+unit**. A text that does not parse, that names something not admitted, or that parses but is not the
+canonical text of the unit it names, is not unit text, and a document carrying it is refused (§7.9).
+
+**Two unit texts name the same unit exactly when they are byte-identical.** `km/h` and `m/s` are
+different units here although they measure one dimension. This specification compares units by text
+and converts nothing: how one admitted unit relates to another is outside it.
+
+**Grammar.** The case-sensitive syntax of the Unified Code for Units of Measure (UCUM), read over the
+vocabulary below and nothing else:
+
+- A unit is a sequence of components joined by `.` (multiply) and `/` (divide), both left-associative
+  with equal precedence, so `a/b.c` is a·b⁻¹·c. A text may begin with `/` (`/min`).
+- A component is a parenthesised unit; or the factor `1`; or a **token** — an atom, optionally under
+  one prefix — followed directly by an optional integer exponent with an optional sign (`m2`, `s-1`,
+  `m+3`). An exponent lies within ±2147483647; an exponent of zero removes its atom.
+- Nothing else is read: no whitespace anywhere, no annotation (`{...}`), no numeric factor other than
+  `1` (`10*3`, `1000`).
+
+**Vocabulary.** The admitted atoms, and whether each takes a prefix:
+
+| Takes a prefix | Atoms |
+|---|---|
+| yes | `m` `g` `s` `A` `K` `mol` `cd` `rad` `sr` `Hz` `N` `Pa` `J` `W` `C` `V` `F` `Ohm` `S` `Wb` `T` `H` `lm` `lx` `Bq` `Gy` `Sv` `kat` `L` `t` `bar` |
+| no | `min` `h` `d` `wk` `a` `%` `[ppm]` `[ppb]` `[in_i]` `[ft_i]` `[yd_i]` `[mi_i]` `[lb_av]` `[oz_av]` |
+
+- `l` is read as `L`.
+- A **currency** is an ISO 4217 alphabetic code in brackets — three capital letters, `[GBP]` — and
+  takes a prefix (`c[GBP]` is a hundredth of a pound). The shape is checked, not membership of the
+  current ISO list: a retired code still names what was recorded in it. UCUM's arbitrary units that
+  share the shape — `[CFU]`, `[PFU]`, `[FFU]`, `[BAU]`, `[PNU]`, `[FEU]`, `[ELU]` — are not
+  currencies and are not admitted.
+- The prefixes are `Y` `Z` `E` `P` `T` `G` `M` `k` `h` `da` `d` `c` `m` `u` `n` `p` `f` `a` `z` `y`
+  (`u` is UCUM's ASCII micro). A token is read as a whole atom first, and as prefix and atom only
+  when it is not one: `Pa` is the pascal, `cd` the candela, `a` the year, `am` the attometre. `da`
+  is tried before `d`. A prefix on an atom that takes none (`kmin`) is not admitted.
+- Deliberately not admitted: units whose relation to their dimension is not a ratio — degrees Celsius
+  and Fahrenheit, the logarithmic units — UCUM's arbitrary units, and the angular degree. Admitting
+  one later is additive (§8); withdrawing one would not be.
+
+**Canonical text.** The one text of a unit is written from its factors:
+
+1. Equal tokens — the same prefix on the same atom, after `l` is read as `L` — are merged by adding
+   their exponents, and a factor whose exponent is zero is dropped.
+2. Factors are ordered by atom, then by prefix, ordinally (§3.1 rule 12).
+3. The factors with a positive exponent come first, joined by `.`; then each factor with a negative
+   exponent, as `/` and the factor, in the same order.
+4. An exponent is written as its magnitude in ASCII digits directly after the token, and omitted
+   where it is 1 — never a sign.
+5. A unit with no factors is `1`, the dimensionless unit. A unit whose every exponent is negative
+   begins with `/`.
+
+So `kg.m/s2`, `/min`, `c[GBP]`, `mg/dL` and `1` are canonical; `s-1` (written `/s`), `m.kg`
+(`kg.m`), `m.m` (`m2`), `ml` (`mL`) and `kg/(m.s2)` (`kg/m/s2`) parse, and are not.
 
 ---
 
@@ -411,7 +475,23 @@ Corpus: `vintage-ref/ref.json`, `vintage-ref/ref-unpinned.json`, `vintage-ref/re
 |---|---|---|
 | `name` | string | The diagnostic this gate reads, matching a key of the outcome's `diagnostics`. |
 | `threshold` | real | Finite (§3.1 rule 9). |
+| `unit` | unit text, **late** | The unit `threshold` is stated in (§3.5). Omitted where the gate states none (§3.1 rule 5). |
 | `direction` | string | `"atLeast"` or `"atMost"` (§7.5). Any other value is refused. |
+
+**The gate rule: a comparison is never made across units.** An executor evaluates a gate only where
+the gate's `unit` and the unit the provider reports for the diagnostic it reads are the same unit
+text (§3.5), or are both absent — the path every gate took before units could be stated. Otherwise it
+MUST NOT evaluate the gate and MUST NOT convert either value: it refuses with `gateUnitMismatch`
+(§5.7.1), naming the gate, the unit it stated and the unit reported. A gate that states no unit
+against a diagnostic that has one is refused as well, for the reason §7.5 refuses a guessed
+direction: a threshold read in a unit nobody stated is a gate that can silently pass. A threshold of
+`2` in grams against an error reported in kilograms is wrong by a factor of a thousand while looking
+like a pass, and the submitter, not the executor, knows which of the two was meant — so the
+executor names the disagreement rather than resolving it.
+
+A provider's units are a property of the provider, so an executor ordinarily knows them before it
+schedules anything and refuses the item on the receipt. Whenever it learns them, it MUST NOT register
+an outcome carrying a verdict over the mismatch (§5.4, `outcome-gate-unit-mismatch`).
 
 **`fitSubmission`**
 
@@ -483,6 +563,7 @@ Corpus: `fit-submission/submission.json`, `batch.json`, `receipt.json`, and four
 |---|---|---|
 | `name` | string | |
 | `threshold` | real | As submitted. |
+| `unit` | unit text, **late** | As submitted: the unit both `threshold` and `observed` are in. Equal to the unit `diagnosticUnits` states for `name`, or absent where it states none (§5.3's gate rule). |
 | `direction` | string | As submitted. |
 | `observed` | real | The diagnostic's value. Finite. |
 | `passed` | bool | The executor's evaluation of `observed` against `threshold` and `direction`. |
@@ -503,6 +584,7 @@ the identity rule is directly certifiable.
 | `compositeKey` | `compositeKey` | Carried in full: an outcome that names only its hash cannot be re-derived by a party that lost the submission. |
 | `artifactRef` | `artifactRef`, opt | `null` when the fit produced no retained artifact (a refused or failed run recorded for the evidence base). |
 | `diagnostics` | map of real | Ordinal-sorted keys (§3.1 rule 4). A non-finite value is **omitted**, never encoded as `null` or `0`. |
+| `diagnosticUnits` | map of unit text, **late** | Ordinal-sorted keys. Each key names a member of `diagnostics`; its value is the unit that diagnostic is stated in (§3.5). A diagnostic with no entry states no unit. The unit of a diagnostic omitted as non-finite is omitted with it. Omitted when it has no entries (§3.1 rule 5). |
 | `gateVerdicts` | `gateVerdict[]` | Sorted ordinally by `name`. |
 | `status` | string | A registered lifecycle status (§7.7). |
 | `timing` | `timing` | |
@@ -519,8 +601,18 @@ the identity rule is directly certifiable.
 name, ranks one model above another, or defines a good value. A gate is the only place a threshold
 appears, and the threshold came from the submitter.
 
-Corpus: `fit-outcome/outcome.json`, `outcome-gate-failed.json`, `composite-key.json`, and a reject
-vector for the identity mismatch of §4.3.
+**A diagnostic's value has a unit, and the outcome may say what it is.** An error is in the unit of
+what was predicted, a ratio is dimensionless, a coefficient is in one unit per another; a reader
+comparing two outcomes, or a gate thresholding one, needs to know which, and the number alone cannot
+say. `diagnosticUnits` states it beside the value rather than inside it, so `diagnostics` keeps its
+type and an outcome that states no units is the document it always was. Stating a unit interprets
+nothing: it says what a number measures, never what a good value is, and the vocabulary of diagnostic
+names stays the provider's.
+
+Corpus: `fit-outcome/outcome.json`, `outcome-gate-failed.json`, `outcome-units.json`,
+`composite-key.json`, a reject vector for the identity mismatch of §4.3, and reject vectors for a unit
+that is not unit text, a unit for a diagnostic the outcome does not carry, and a verdict stated in
+another unit than its diagnostic.
 
 ### 5.5 Registry query (profile: submitter)
 
@@ -554,8 +646,8 @@ echoed unmodified and MUST NOT be parsed, compared or constructed. An exhausted 
 cursor is refused (`query-cursor-invalid`), never silently restarted from the beginning: a silent
 restart turns a paging loop into an infinite one.
 
-Corpus: `registry-query/query.json`, `query-any.json`, `page.json`, `page-last.json`, and a reject
-vector.
+Corpus: `registry-query/query.json`, `query-any.json`, `page.json`, `page-last.json`,
+`page-units.json`, and a reject vector.
 
 ### 5.6 Score request (profile: submitter)
 
@@ -606,6 +698,7 @@ Encoded per §3.4: `class` first, then the case's members in the order given.
 | `scoreRefused` | `reason` (string, §7.8), `detail` (string) | Scoring was refused with a typed sub-reason. |
 | `storageFailure` | `reason` (string) | The underlying store failed. Diagnostic; the wording is not stable and MUST NOT be matched on. |
 | `unspecified` | `message` (string) | The catch-all. See §5.7.2. |
+| `gateUnitMismatch` | `name` (string), `unit` (unit text, opt), `reported` (unit text, opt) | A gate's unit is not the unit the provider reports its diagnostic in (§5.3's gate rule). `unit` is the gate's, `reported` the diagnostic's; either is `null` where that side states no unit. Registered after version 1, so its members are declared from its first day and are not late members. |
 
 **`unspecified` exists so that nothing escapes as an exception.** An executor that hits a condition
 it has no class for MUST emit `unspecified` with a diagnostic message; it MUST NOT return a bare
@@ -628,9 +721,8 @@ The vocabulary is **closed for interpretation and open for addition**:
    `envelopeVersion`. Removing one is the change that turns a handled condition into an unhandled
    one at every reader that was branching on it.
 
-Corpus: `refusal/classes.json` (one instance of every class, in registry order) and
-`refusal/unknown-class.json` (an `accept` vector: an unregistered class a conformant reader MUST
-accept as `unspecified`).
+Corpus: one vector per registered class in `refusal/`, and `refusal/unknown-class.json` (an
+`accept` vector: an unregistered class a conformant reader MUST accept as `unspecified`).
 
 ---
 
@@ -793,6 +885,10 @@ never emitted and so no refusal ever crosses.
 | `submission-submitter-class-unknown` | fit submission | `submitterClass` is not in §7.6. | `invalidSubmission` |
 | `submission-spec-hash-absent` | fit submission | `specHash` is empty or is not a content address (§4.1). | `invalidSubmission` |
 | `outcome-composite-key-mismatch` | fit outcome | `compositeKeyHash` ≠ a recomputation over `compositeKey` (§4.3). | `invalidSubmission` |
+| `outcome-diagnostic-unit-invalid` | fit outcome | A `diagnosticUnits` value, or a verdict's `unit`, is not unit text (§3.5). | `invalidSubmission` |
+| `outcome-diagnostic-unit-orphan` | fit outcome | A `diagnosticUnits` key names no member of `diagnostics` (§5.4). | `invalidSubmission` |
+| `outcome-gate-unit-mismatch` | fit outcome | A verdict's `unit` is not the unit `diagnosticUnits` states for its `name`, absent counting as a value (§5.3's gate rule). | `invalidSubmission` |
+| `submission-gate-unit-invalid` | fit submission | A gate's `unit` is not unit text (§3.5). | `invalidSubmission` |
 | `query-limit-out-of-range` | registry query | `page.limit` outside `1…1000`. | `invalidQuery` |
 | `score-output-collides-with-input` | score request | `outputDatasetId` equals `input.datasetId` (§5.6). | `invalidSubmission` |
 | `submission-spec-hash-non-canonical` | spec hash | `specHash` is not the minting of `specPayload` under the registered algorithm the document names (§4.5). | — (pre-emit; the executor is forbidden to check this — §4.2 rule 2) |
@@ -805,8 +901,9 @@ never emitted and so no refusal ever crosses.
 distinct from a dataset's `version` (an ordinal within one dataset) and from a provider's
 `providerVersion`; the three move independently and MUST NOT be conflated.
 
-- **Additive changes do not bump it.** A new optional member, a new registry entry (a document kind,
-  a format, a status, a refusal class, a score reason), or a new fixture family is additive. A
+- **Additive changes do not bump it.** A new optional member (added as a late member, §3.1 rule 5), a
+  new registry entry (a document kind, a format, a status, a refusal class, a score reason, an
+  admitted unit), or a new fixture family is additive. A
   reader MUST ignore members it does not recognise, and MUST apply the fallback its §5 rule names
   for an unrecognised discriminator (`unknownDocumentKind` for a kind, `unspecified` for a refusal
   class).
@@ -935,7 +1032,10 @@ Ordered by how often each one is the thing that is wrong.
 
 - [ ] Record members in **declaration order**, not sorted; **map** keys sorted (§3.2 divergence 1).
 - [ ] No whitespace anywhere.
-- [ ] Optional members present as `null`, never omitted.
+- [ ] Optional members present as `null`, never omitted — except a late member, which is omitted when
+      it carries nothing (§3.1 rule 5).
+- [ ] A unit as its one canonical text (§3.5), and a gate never compared with a diagnostic stated in
+      another unit (§5.3).
 - [ ] 64-bit integers (`seed`, `rowCount`, `durationMs`) as **sign-prefixed strings**.
 - [ ] Real numbers by the ECMAScript shortest-round-trip rule; no non-finite values on the wire.
 - [ ] `specPayload` neither parsed nor re-encoded — the bytes you received are the bytes you store.

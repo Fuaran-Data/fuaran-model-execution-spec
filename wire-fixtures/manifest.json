@@ -184,6 +184,26 @@
       "description": "An empty spec hash. The executor cannot mint one — the payload is opaque to it — so a submission with no hash is a fit that can never be joined to the decision that asked for it."
     },
     {
+      "id": "fit-submission/submission-gate-unit",
+      "family": "fit-submission",
+      "profile": "submitter",
+      "kind": "round-trip",
+      "file": "fit-submission/submission-gate-unit.json",
+      "sha256": "38c117cef1919aea0c3b99ef2703ae02cfc93ce1f3b24204fec7f84c2769050b",
+      "description": "Gates that state the unit of their threshold (§5.3) — kilograms, the dimensionless `1` — beside one that states none, which omits the member rather than writing `null` (§3.1 rule 5). Authored out of order and emitted sorted."
+    },
+    {
+      "id": "fit-submission/reject-gate-unit-invalid",
+      "family": "fit-submission",
+      "profile": "executor",
+      "kind": "reject",
+      "file": "fit-submission/reject-gate-unit-invalid.json",
+      "sha256": "e9e96c8b7049cfb772f0915b5a143a6c3858b74c2d50a5182ab53e6acd309492",
+      "reject": "submission-gate-unit-invalid",
+      "detect": "rule",
+      "description": "A gate whose unit is not unit text (§3.5). Refused before anything is scheduled: a threshold in a unit nobody can read is a threshold nobody can compare against."
+    },
+    {
       "id": "fit-outcome/composite-key",
       "family": "fit-outcome",
       "profile": "observer",
@@ -223,6 +243,60 @@
       "reject": "outcome-composite-key-mismatch",
       "detect": "rule",
       "description": "An outcome whose stated identity does not match a recomputation over its own composite key. Corrupt or edited after registration — refused, never stored. Schema-valid by construction: only the identity rule catches it."
+    },
+    {
+      "id": "fit-outcome/outcome-units",
+      "family": "fit-outcome",
+      "profile": "observer",
+      "kind": "hash",
+      "file": "fit-outcome/outcome-units.json",
+      "sha256": "1ac6184c1e901ab15b46760cd01ef09fbca7a6e2833659d7526f30f75ea61aa4",
+      "digest": "sha256:10cc8272e7cb14fd5f56af5b556fc910b613ad59ab796a78adef78772e7b88ff",
+      "description": "A backend that states what its diagnostics measure (§5.4): an error in kilograms, a dimensionless ratio, a mean absolute error in pence, and one diagnostic stated with no unit. A non-finite diagnostic is dropped and its unit with it; gate verdicts carry the unit of their threshold, the verdict on the unit-less diagnostic none."
+    },
+    {
+      "id": "fit-outcome/reject-diagnostic-unit-invalid",
+      "family": "fit-outcome",
+      "profile": "executor",
+      "kind": "reject",
+      "file": "fit-outcome/reject-diagnostic-unit-invalid.json",
+      "sha256": "32359eb4a49eaa7088686a2ff419ee62b00a51a4a91cfbabc147d68bd622e1bf",
+      "reject": "outcome-diagnostic-unit-invalid",
+      "detect": "rule",
+      "description": "A diagnostic unit that does not parse (§3.5): a space where the grammar wants `.` or `/`. Schema-valid by construction — a unit is a string to a schema — so only the unit-text rule catches it."
+    },
+    {
+      "id": "fit-outcome/reject-diagnostic-unit-non-canonical",
+      "family": "fit-outcome",
+      "profile": "executor",
+      "kind": "reject",
+      "file": "fit-outcome/reject-diagnostic-unit-non-canonical.json",
+      "sha256": "4eec5ce0ce55fabecb7a8c3d464b474f32fa5bbbb187736873f4c24857e068eb",
+      "reject": "outcome-diagnostic-unit-invalid",
+      "detect": "rule",
+      "description": "A unit that parses but is not its canonical text (§3.5): `s-1` where the unit is written `/s`. Refused rather than normalised — two texts for one unit would give one outcome two encodings."
+    },
+    {
+      "id": "fit-outcome/reject-diagnostic-unit-orphan",
+      "family": "fit-outcome",
+      "profile": "executor",
+      "kind": "reject",
+      "file": "fit-outcome/reject-diagnostic-unit-orphan.json",
+      "sha256": "375c732bdff1e5b0105224b8f64aa00e3cf9d01b9e312df68905c816887e62a2",
+      "reject": "outcome-diagnostic-unit-orphan",
+      "detect": "rule",
+      "description": "A unit for a diagnostic the outcome does not carry (§5.4). A statement about nothing, and the one shape in which a reader could not tell a lost diagnostic from an invented unit."
+    },
+    {
+      "id": "fit-outcome/reject-gate-unit-mismatch",
+      "family": "fit-outcome",
+      "profile": "executor",
+      "kind": "reject",
+      "file": "fit-outcome/reject-gate-unit-mismatch.json",
+      "sha256": "22fece2fd0bb1832f720f8d997d2c0658c97fc0964345c962155bbbad9949d82",
+      "reject": "outcome-gate-unit-mismatch",
+      "detect": "rule",
+      "description": "A verdict whose threshold is in grams over an error reported in kilograms (§5.3's gate rule). The comparison it records is one no executor may make, so an outcome carrying it is refused, never stored."
     },
     {
       "id": "registry-query/query",
@@ -270,6 +344,15 @@
       "reject": "query-limit-out-of-range",
       "detect": "schema",
       "description": "A page size of zero. Answering it with a default page size would make a caller's loop silently ask for something else than it asked for."
+    },
+    {
+      "id": "registry-query/page-units",
+      "family": "registry-query",
+      "profile": "submitter",
+      "kind": "round-trip",
+      "file": "registry-query/page-units.json",
+      "sha256": "738183f5876a94ec920f4fe1a28a37e277b48fcd94616c780c7fcc129dd95732",
+      "description": "The last page, holding an outcome that states no units beside one that states them: the units travel with the outcome, and the outcome without them keeps the bytes it has in every other vector."
     },
     {
       "id": "score-request/request",
@@ -425,6 +508,15 @@
       "file": "refusal/unspecified.json",
       "sha256": "814193f5bf097c51036ed994cd77ae88f5c76a070a3cd2cdeb5181cf21790489",
       "description": "The catch-all, so that nothing ever escapes as an exception. A refusal a program cannot branch on is still infinitely better than one it cannot detect."
+    },
+    {
+      "id": "refusal/gate-unit-mismatch",
+      "family": "refusal",
+      "profile": "observer",
+      "kind": "round-trip",
+      "file": "refusal/gate-unit-mismatch.json",
+      "sha256": "ac92df33076eb2e63c7a9fcf126458cd9e555ce8790eda7b7967f583053e1f71",
+      "description": "A gate stated in grams against a diagnostic the provider reports in kilograms (§5.3's gate rule): refused by name, never converted. Registered after version 1, so every member is declared from its first day and `null` would stand where a side states no unit."
     },
     {
       "id": "refusal/unknown-class",

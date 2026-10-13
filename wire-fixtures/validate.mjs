@@ -314,7 +314,135 @@ const REGISTERED_REFUSALS = new Set([
   "scoreRefused",
   "storageFailure",
   "unspecified",
+  "gateUnitMismatch",
 ]);
+
+// §3.5 / Appendix C — unit text. A second implementation of the unit
+// grammar and its canonical form, written from the specification alone, so
+// that a host's unit reader and this one agreeing on the corpus is evidence
+// rather than a shared accident. It answers one question: is this text the
+// canonical text of an admitted unit?
+const UNIT_ATOMS = new Map([
+  // [symbol, takes an SI prefix]
+  ...["m", "g", "s", "A", "K", "mol", "cd", "rad", "sr", "Hz", "N", "Pa", "J", "W", "C", "V", "F", "Ohm", "S", "Wb", "T", "H", "lm", "lx", "Bq", "Gy", "Sv", "kat", "L", "t", "bar"].map((a) => [a, true]),
+  ...["min", "h", "d", "wk", "a", "%", "[ppm]", "[ppb]", "[in_i]", "[ft_i]", "[yd_i]", "[mi_i]", "[lb_av]", "[oz_av]"].map((a) => [a, false]),
+]);
+const UNIT_ALIASES = new Map([["l", "L"]]);
+// Longest first, so `da` is tried before `d`.
+const UNIT_PREFIXES = ["da", "Y", "Z", "E", "P", "T", "G", "M", "k", "h", "d", "c", "m", "u", "n", "p", "f", "a", "z", "y"];
+// Arbitrary units that share a currency's shape, and are not currencies.
+const NOT_CURRENCIES = new Set(["[CFU]", "[PFU]", "[FFU]", "[BAU]", "[PNU]", "[FEU]", "[ELU]"]);
+
+/** A token as an atom: [symbol, prefix, takes-a-prefix], or null. */
+function unitAtom(token) {
+  const whole = UNIT_ALIASES.get(token) ?? token;
+  if (UNIT_ATOMS.has(whole)) return [whole, ""];
+  if (/^\[[A-Z]{3}\]$/.test(token) && !NOT_CURRENCIES.has(token)) return [token, ""];
+  for (const prefix of UNIT_PREFIXES) {
+    if (!token.startsWith(prefix) || token.length === prefix.length) continue;
+    const rest = UNIT_ALIASES.get(token.slice(prefix.length)) ?? token.slice(prefix.length);
+    const metric = UNIT_ATOMS.has(rest) ? UNIT_ATOMS.get(rest) : /^\[[A-Z]{3}\]$/.test(rest) && !NOT_CURRENCIES.has(rest);
+    if (metric) return [rest, prefix];
+    if (UNIT_ATOMS.has(rest)) return null; // a prefix on an atom that takes none
+  }
+  return null;
+}
+
+/** Parse unit text to its factors (`symbol|prefix` -> exponent), or throw. */
+function parseUnit(text) {
+  let pos = 0;
+  const factors = new Map();
+  const add = (into, key, e) => into.set(key, (into.get(key) ?? 0) + e);
+
+  const term = (closing) => {
+    const acc = new Map();
+    let sign = 1;
+    if (text[pos] === "/") {
+      sign = -1;
+      pos += 1;
+    }
+    for (;;) {
+      const part = component();
+      for (const [k, e] of part) add(acc, k, sign * e);
+      if (pos === text.length || text[pos] === closing) return acc;
+      if (text[pos] === ".") sign = 1;
+      else if (text[pos] === "/") sign = -1;
+      else throw new Error(`unexpected '${text[pos]}' at ${pos}`);
+      pos += 1;
+    }
+  };
+
+  const component = () => {
+    if (text[pos] === "(") {
+      pos += 1;
+      const inner = term(")");
+      if (text[pos] !== ")") throw new Error(`unclosed '(' at ${pos}`);
+      pos += 1;
+      return inner;
+    }
+    if (/[0-9]/.test(text[pos] ?? "")) {
+      const start = pos;
+      while (/[0-9*^]/.test(text[pos] ?? "")) pos += 1;
+      if (text.slice(start, pos) !== "1") throw new Error(`a numeric factor '${text.slice(start, pos)}' at ${start}`);
+      return new Map();
+    }
+    const start = pos;
+    while (pos < text.length) {
+      if (text[pos] === "[") {
+        const close = text.indexOf("]", pos);
+        if (close < 0) throw new Error(`unclosed '[' at ${pos}`);
+        pos = close + 1;
+      } else if (/[A-Za-z%]/.test(text[pos])) pos += 1;
+      else break;
+    }
+    const token = text.slice(start, pos);
+    if (token === "") throw new Error(`expected a unit at ${pos}`);
+    const atom = unitAtom(token);
+    if (!atom) throw new Error(`'${token}' is not an admitted unit`);
+    const expStart = pos;
+    if (text[pos] === "+" || text[pos] === "-") pos += 1;
+    const digitsStart = pos;
+    while (/[0-9]/.test(text[pos] ?? "")) pos += 1;
+    let e = 1;
+    if (pos > expStart) {
+      if (pos === digitsStart) throw new Error(`a sign with no exponent at ${expStart}`);
+      e = Number(text.slice(expStart, pos));
+      if (!Number.isSafeInteger(e) || Math.abs(e) > 2147483647) throw new Error(`exponent out of range at ${expStart}`);
+    }
+    return new Map(e === 0 ? [] : [[atom[0] + "|" + atom[1], e]]);
+  };
+
+  if (text.length === 0) throw new Error("empty");
+  for (const [k, e] of term(undefined)) add(factors, k, e);
+  if (pos !== text.length) throw new Error(`unexpected '${text[pos]}' at ${pos}`);
+  return factors;
+}
+
+/** The one canonical text of a unit's factors (§3.5). */
+function renderUnit(factors) {
+  const ordered = [...factors]
+    .filter(([, e]) => e !== 0)
+    .map(([k, e]) => [...k.split("|"), e])
+    .sort((a, b) => ordinal(a[0], b[0]) || ordinal(a[1], b[1]));
+  const text = ([symbol, prefix, e]) => prefix + symbol + (Math.abs(e) === 1 ? "" : String(Math.abs(e)));
+  const up = ordered.filter(([, , e]) => e > 0).map(text);
+  const down = ordered.filter(([, , e]) => e < 0).map(text);
+  return up.length === 0 && down.length === 0 ? "1" : up.join(".") + down.map((t) => "/" + t).join("");
+}
+
+const ordinal = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** Why a text is not canonical unit text, or null when it is. */
+function unitTextViolation(text) {
+  let factors;
+  try {
+    factors = parseUnit(text);
+  } catch (error) {
+    return `'${text}' is not a unit: ${error.message}`;
+  }
+  const canonical = renderUnit(factors);
+  return canonical === text ? null : `'${text}' is not canonical unit text; the unit is written '${canonical}'`;
+}
 
 /** Structural violations of a whole document: envelope, then body. */
 function structuralViolations(document) {
@@ -340,6 +468,37 @@ function ruleViolations(document) {
   };
   if (document.kind === "fitOutcome") checkOutcome(body, ".body");
   if (document.kind === "outcomePage") body.outcomes.forEach((o, i) => checkOutcome(o, `.body.outcomes[${i}]`));
+
+  // §3.5 / §5.4 / §5.3's gate rule — a unit is canonical unit text, it names
+  // a diagnostic the outcome carries, and a verdict is stated in its
+  // diagnostic's unit (absent on both sides is agreement).
+  const checkUnits = (outcome, at) => {
+    const units = outcome.diagnosticUnits ?? {};
+    for (const [name, unit] of Object.entries(units)) {
+      const why = unitTextViolation(unit);
+      if (why) bad.push(`${at}.diagnosticUnits.${name}: ${why}`);
+      if (!(name in outcome.diagnostics)) bad.push(`${at}.diagnosticUnits.${name}: names a diagnostic the outcome does not carry`);
+    }
+    outcome.gateVerdicts.forEach((v, i) => {
+      if (v.unit !== undefined) {
+        const why = unitTextViolation(v.unit);
+        if (why) bad.push(`${at}.gateVerdicts[${i}].unit: ${why}`);
+      }
+      if ((v.unit ?? null) !== (units[v.name] ?? null))
+        bad.push(`${at}.gateVerdicts[${i}]: stated in ${v.unit ?? "no unit"}, its diagnostic in ${units[v.name] ?? "no unit"}`);
+    });
+  };
+  if (document.kind === "fitOutcome") checkUnits(body, ".body");
+  if (document.kind === "outcomePage") body.outcomes.forEach((o, i) => checkUnits(o, `.body.outcomes[${i}]`));
+
+  const checkGateUnits = (submission, at) =>
+    (submission.gates ?? []).forEach((g, i) => {
+      const why = g.unit === undefined ? null : unitTextViolation(g.unit);
+      if (why) bad.push(`${at}.gates[${i}].unit: ${why}`);
+    });
+  if (document.kind === "fitSubmission") checkGateUnits(body, ".body");
+  if (document.kind === "fitSubmissionBatch")
+    body.submissions.forEach((s, i) => checkGateUnits(s, `.body.submissions[${i}]`));
 
   // §4.2 rule 5 / §4.5 — a submission that NAMES the registered minting
   // rule must actually have minted under it. §4.2 rule 2 forbids every
@@ -484,6 +643,56 @@ if (selfTest) {
           }).length > 0
         );
       },
+    ],
+    [
+      "a unit text that is not a unit",
+      () => {
+        const units = JSON.parse(readFileSync(join(here, "fit-outcome/outcome-units.json"), "utf8"));
+        units.body.diagnosticUnits.mae = "c GBP";
+        return ruleViolations(units).length > 0;
+      },
+    ],
+    [
+      "a unit text that is a unit but not its canonical text",
+      () => {
+        const units = JSON.parse(readFileSync(join(here, "fit-outcome/outcome-units.json"), "utf8"));
+        units.body.diagnosticUnits.mae = "s-1.c[GBP]";
+        return ruleViolations(units).length > 0;
+      },
+    ],
+    [
+      "a unit for a diagnostic the outcome does not carry",
+      () => {
+        const units = JSON.parse(readFileSync(join(here, "fit-outcome/outcome-units.json"), "utf8"));
+        units.body.diagnosticUnits.aic = "1";
+        return ruleViolations(units).length > 0;
+      },
+    ],
+    [
+      "a verdict in grams over a diagnostic in kilograms",
+      () => {
+        const units = JSON.parse(readFileSync(join(here, "fit-outcome/outcome-units.json"), "utf8"));
+        units.body.gateVerdicts.find((v) => v.name === "rmse").unit = "g";
+        return ruleViolations(units).length > 0;
+      },
+    ],
+    [
+      "a verdict stating no unit over a diagnostic that has one",
+      () => {
+        const units = JSON.parse(readFileSync(join(here, "fit-outcome/outcome-units.json"), "utf8"));
+        delete units.body.gateVerdicts.find((v) => v.name === "rmse").unit;
+        return ruleViolations(units).length > 0;
+      },
+    ],
+    [
+      "the unit reader agreeing with the canonical texts it must accept (a reader that refused everything would pass the probes above)",
+      () =>
+        ["1", "kg", "c[GBP]", "kg.m/s2", "/min", "k[GBP]", "mL", "[in_i]2", "N.m", "mg/dL"].every((t) => unitTextViolation(t) === null) &&
+        // §3.5's worked examples: each parses, and each names its canonical text.
+        [["s-1", "/s"], ["m.kg", "kg.m"], ["m.m", "m2"], ["ml", "mL"], ["kg/(m.s2)", "kg/m/s2"]].every(([text, written]) =>
+          (unitTextViolation(text) ?? "").includes(`'${written}'`),
+        ) &&
+        ["kg m", "kilogram", "kmin", "10*3", "Cel", "[CFU]", "{beats}/min", ""].every((t) => unitTextViolation(t) !== null),
     ],
     [
       "an unregistered refusal class on a non-accept vector",

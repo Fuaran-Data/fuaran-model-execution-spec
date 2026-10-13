@@ -72,6 +72,11 @@ const instant = (value) => JSON.stringify(value);
 /** Optional: absent is `null`, present is the value (§3.1 r5). */
 const opt = (value, encode) => (value === null || value === undefined ? "null" : encode(value));
 
+/** A late member (§3.1 rule 5): a member added after version 1 is OMITTED
+ *  when it carries nothing — never `null`, never `{}` — so a document that
+ *  states nothing in it keeps the bytes it had before the member existed. */
+const late = (name, value, encode) => (value === null || value === undefined ? [] : [[name, encode(value)]]);
+
 /** Ordinal (code-unit) comparison — never culture-sensitive (§3.1 r12). */
 const ordinal = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const by = (key) => (a, b) => ordinal(key(a), key(b));
@@ -146,6 +151,8 @@ const gate = (g) =>
   rec([
     ["name", str(g.name)],
     ["threshold", real(g.threshold)],
+    // The unit the threshold is stated in (§5.3), a late member.
+    ...late("unit", g.unit, str),
     ["direction", str(g.direction)],
   ]);
 
@@ -201,6 +208,7 @@ const gateVerdict = (v) =>
   rec([
     ["name", str(v.name)],
     ["threshold", real(v.threshold)],
+    ...late("unit", v.unit, str),
     ["direction", str(v.direction)],
     ["observed", real(v.observed)],
     ["passed", bool(v.passed)],
@@ -241,6 +249,9 @@ const fitOutcome = (o) =>
     ["artifactRef", opt(o.artifactRef, artifactRef)],
     // A non-finite diagnostic is omitted, never encoded (§5.4).
     ["diagnostics", map(finiteOnly(o.diagnostics), real)],
+    // A late member: omitted when empty, and a unit goes with its
+    // diagnostic when that diagnostic is omitted (§5.4).
+    ...late("diagnosticUnits", unitsOf(o), (units) => map(units, str)),
     ["gateVerdicts", arr([...o.gateVerdicts].sort(by((v) => v.name)).map(gateVerdict))],
     ["status", str(o.status)],
     ["timing", timing(o.timing)],
@@ -251,6 +262,14 @@ const fitOutcome = (o) =>
 
 const finiteOnly = (entries) =>
   Object.fromEntries(Object.entries(entries).filter(([, v]) => Number.isFinite(v)));
+
+/** The units of the diagnostics the outcome actually carries, or null when
+ *  that leaves none. */
+const unitsOf = (o) => {
+  const kept = finiteOnly(o.diagnostics);
+  const units = Object.entries(o.diagnosticUnits ?? {}).filter(([name]) => name in kept);
+  return units.length === 0 ? null : Object.fromEntries(units);
+};
 
 const page = (p) =>
   rec([
@@ -330,6 +349,13 @@ const refusalMembers = {
   ],
   storageFailure: (r) => [["reason", str(r.reason)]],
   unspecified: (r) => [["message", str(r.message)]],
+  // Registered after version 1, so its members are declared from its first
+  // day: all present, `null` where a side states no unit (§5.7.1).
+  gateUnitMismatch: (r) => [
+    ["name", str(r.name)],
+    ["unit", opt(r.unit, str)],
+    ["reported", opt(r.reported, str)],
+  ],
 };
 
 function refusal(r) {
@@ -519,6 +545,56 @@ const gateFailedOutcome = {
   registeredAt: "2026-07-20T09:38:41+00:00",
 };
 
+// A backend that states what its diagnostics measure (§3.5, §5.4): an error
+// in kilograms, a ratio that is dimensionless, a mean absolute error in
+// pence, and one diagnostic it states no unit for. The Infinity entry is
+// dropped, and its unit with it. Gates state the unit of their threshold,
+// and the gate on the unit-less diagnostic states none.
+const unitsKey = { ...primaryKey, seed: 20261013 };
+
+const unitsOutcome = {
+  compositeKey: unitsKey,
+  artifactRef: {
+    artifactId: "artifact-7c02",
+    contentHash: "sha256:5e8a1f0c7d93b46e2a1c0f8b7d6e5a4938271605f4e3d2c1b0a9f8e7d6c5b4a3",
+    format: "arrow-ipc",
+  },
+  diagnostics: {
+    rmse: 1.25,
+    "condition-number": Number.POSITIVE_INFINITY,
+    mae: 37.5,
+    elasticity: -0.42,
+    "r-squared": 0.83,
+  },
+  diagnosticUnits: { "r-squared": "1", "condition-number": "1", rmse: "kg", mae: "c[GBP]" },
+  gateVerdicts: [
+    { name: "rmse", threshold: 2, unit: "kg", direction: "atMost", observed: 1.25, passed: true },
+    { name: "elasticity", threshold: -1, direction: "atLeast", observed: -0.42, passed: true },
+    { name: "r-squared", threshold: 0.7, unit: "1", direction: "atLeast", observed: 0.83, passed: true },
+  ],
+  status: "registered",
+  timing: {
+    submittedAt: "2026-10-13T08:00:00+00:00",
+    startedAt: "2026-10-13T08:00:02+00:00",
+    completedAt: "2026-10-13T08:06:40+00:00",
+    durationMs: 398000,
+  },
+  cost: null,
+  annotations: {},
+  registeredAt: "2026-10-13T08:06:41+00:00",
+};
+
+const unitsSubmission = {
+  ...submission,
+  seed: 20261013,
+  // Out of order on purpose; one gate states no unit.
+  gates: [
+    { name: "rmse", threshold: 2, unit: "kg", direction: "atMost" },
+    { name: "elasticity", threshold: -1, direction: "atLeast" },
+    { name: "r-squared", threshold: 0.7, unit: "1", direction: "atLeast" },
+  ],
+};
+
 const query = {
   // Out of order on purpose.
   specHashes: [altSpecHash, specHash],
@@ -538,6 +614,7 @@ const queryAny = {
 
 const filledPage = { outcomes: [gateFailedOutcome, outcome], nextCursor: "b3V0Y29tZS1jdXJzb3ItMg" };
 const lastPage = { outcomes: [outcome], nextCursor: null };
+const unitsPage = { outcomes: [outcome, unitsOutcome], nextCursor: null };
 
 const score = {
   artifactKeyHash: compositeKeyHash(primaryKey),
@@ -641,6 +718,9 @@ const refusals = {
   },
   "storage-failure": { class: "storageFailure", reason: "object store returned 503 after 3 attempts" },
   unspecified: { class: "unspecified", message: "the executor reached a condition it has no class for" },
+  // §5.3's gate rule: a threshold in grams against an error reported in
+  // kilograms is refused by name, never converted.
+  "gate-unit-mismatch": { class: "gateUnitMismatch", name: "rmse", unit: "g", reported: "kg" },
 };
 
 // ── the documents ────────────────────────────────────────────────────
@@ -663,15 +743,18 @@ const documents = () => {
     "fit-submission/submission.json": envelope("fitSubmission", submission),
     "fit-submission/batch.json": envelope("fitSubmissionBatch", batch),
     "fit-submission/receipt.json": envelope("submissionReceipt", receipt),
+    "fit-submission/submission-gate-unit.json": envelope("fitSubmission", unitsSubmission),
 
     "fit-outcome/composite-key.json": envelope("compositeKey", primaryKey),
     "fit-outcome/outcome.json": envelope("fitOutcome", outcome),
     "fit-outcome/outcome-gate-failed.json": envelope("fitOutcome", gateFailedOutcome),
+    "fit-outcome/outcome-units.json": envelope("fitOutcome", unitsOutcome),
 
     "registry-query/query.json": envelope("registryQuery", query),
     "registry-query/query-any.json": envelope("registryQuery", queryAny),
     "registry-query/page.json": envelope("outcomePage", filledPage),
     "registry-query/page-last.json": envelope("outcomePage", lastPage),
+    "registry-query/page-units.json": envelope("outcomePage", unitsPage),
 
     "score-request/request.json": envelope("scoreRequest", score),
   };
@@ -696,6 +779,7 @@ const hashVectorDigests = () => {
     "fit-outcome/composite-key": compositeKeyHash(primaryKey),
     "fit-outcome/outcome": compositeKeyHash(outcome.compositeKey),
     "fit-outcome/outcome-gate-failed": compositeKeyHash(gateFailedOutcome.compositeKey),
+    "fit-outcome/outcome-units": compositeKeyHash(unitsOutcome.compositeKey),
   };
   for (const [id, rendered] of Object.entries(mintingForms)) out[id] = mintSpecHash(rendered);
   return out;
